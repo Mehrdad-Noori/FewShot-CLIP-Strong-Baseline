@@ -27,6 +27,7 @@ def get_arguments():
     parser.add_argument(
         '--dataset_config', default='configs/caltech101.yaml',
         help='dataset config')
+    parser.add_argument('--template', default=None)
     parser.add_argument('--opts', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -34,14 +35,16 @@ def get_arguments():
     cfg.update(load_cfg_from_cfg_file(args.dataset_config))
     if args.opts is not None:
         cfg = merge_cfg_from_list(cfg, args.opts)
-    return cfg
+    return cfg, args.template
 
 
 
 def main():
 
     # Load config file
-    cfg = get_arguments()
+    cfg, temp = get_arguments()
+
+    print(f"+++ template: {temp}")
 
     cache_dir = os.path.join('./caches', cfg['dataset'])
     os.makedirs(cache_dir, exist_ok=True)
@@ -75,8 +78,14 @@ def main():
 
     # Textual features
     print("Getting textual features as CLIP's classifier.")
-    clip_weights = clip_classifier(
-        dataset.classnames, dataset.template, clip_model)
+    if temp:
+        print(f" +++ using the input template: {temp}")
+        clip_weights = clip_classifier(
+            dataset.classnames, [temp], clip_model)
+    else:
+        print(f" +++ using the default dataset's template: {dataset.template}")
+        clip_weights = clip_classifier(
+            dataset.classnames, dataset.template, clip_model)
 
     # Pre-load test features
     f_test_time = time.time()

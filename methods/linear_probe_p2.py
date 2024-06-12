@@ -122,7 +122,7 @@ class LinearProbe_P2(FSCLIPmethod):
         best_acc, best_epoch = 0.0, 0
         for epoch in range(self.epoch):
             
-            print('Running model for epoch: {}'.format(epoch))
+            # print('Running model for epoch: {}'.format(epoch))
             classifier.train()
             vision_logits = classifier(features)
             text_logits = features @ text_weights
@@ -143,7 +143,7 @@ class LinearProbe_P2(FSCLIPmethod):
             text_logits_val = val_features.detach() @ text_weights
             logits_val = vision_logits_val + torch.ones(val_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_val
             acc_val = np.mean(logits_val.argmax(dim=1).cpu().numpy() ==  val_labels.cpu().numpy()) * 100.0
-            print('The accuracy for val data is ',acc_val)
+            # print('The accuracy for val data is ',acc_val)
         
             if acc_val >= best_acc:
                 best_acc = acc_val
@@ -152,7 +152,7 @@ class LinearProbe_P2(FSCLIPmethod):
                 text_logits_test = test_features.detach() @ text_weights
                 logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_test
                 acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() ==  test_labels.cpu().numpy()) * 100.0
-                print('The accuracy for test data is ',acc_test)
+                # print('The accuracy for test data is ',acc_test)
                 # torch.save(classifier, self.output_dir + "/best_lp_model_" + str(self.shot) + "shots.pt")
                 
                 # Evaluation 
