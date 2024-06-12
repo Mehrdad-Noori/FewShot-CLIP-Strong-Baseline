@@ -44,11 +44,12 @@ def clip_classifier(classnames, template, clip_model):
             # prompt ensemble for ImageNet
             class_embeddings = clip_model.encode_text(texts)
             class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
-            class_embedding /= class_embedding.norm()
-            clip_weights.append(class_embedding)
+            if len(template)==1:
+                class_embeddings = class_embeddings.mean(dim=0)
+                class_embeddings /= class_embeddings.norm()
+            clip_weights.append(class_embeddings)
 
-        clip_weights = torch.stack(clip_weights, dim=1).cuda()
+        clip_weights = torch.stack(clip_weights, dim=-1).cuda()
     return clip_weights
 
 

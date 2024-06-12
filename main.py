@@ -78,7 +78,12 @@ def main():
 
     # Textual features
     print("Getting textual features as CLIP's classifier.")
-    if temp:
+    if temp == "all":
+        temp = ['a photo of a {}', 'itap of a {}', 'a bad photo of the {}.', 'a origami {}.',
+                    'a photo of the large {}.', 'a {} in a video game.', 'art of the {}.', 'a photo of the small {}.']
+        clip_weights = clip_classifier(
+            dataset.classnames, temp, clip_model)
+    elif temp:
         print(f" +++ using the input template: {temp}")
         clip_weights = clip_classifier(
             dataset.classnames, [temp], clip_model)

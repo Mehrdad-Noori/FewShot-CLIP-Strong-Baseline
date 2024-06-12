@@ -7,6 +7,8 @@ import numpy as np
 from scipy.linalg import eigh
 import matplotlib.pyplot as plt
 import os
+from collections import OrderedDict
+from copy import deepcopy
 from torch.autograd import Variable
 
 from tqdm import tqdm
@@ -37,6 +39,30 @@ def calculate_lr_w(features):
     max_eigen = max(w) # check the iters of power iteration
     lr_w =  (4 * features.shape[0]) / max_eigen
     return lr_w
+
+
+def copy_model_and_optimizer(model, optimizer):
+    """Copy the model and optimizer states for resetting after adaptation."""
+    model_state = deepcopy(model.state_dict())
+    optimizer_state = deepcopy(optimizer.state_dict())
+    return model_state, optimizer_state
+
+
+def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
+    """Restore the model and optimizer states from copies."""
+    model.load_state_dict(model_state, strict=True)
+    optimizer.load_state_dict(optimizer_state)
+
+
+def weight_average(alltheweights):
+    K = len(alltheweights)
+    avg_state_dict = OrderedDict()
+    for param_name, param in alltheweights[0].items():
+        avg_param = sum(sd[param_name] for sd in alltheweights)
+        avg_param /= K
+        avg_state_dict[param_name] = avg_param
+    return avg_state_dict
+
 
 class LinearProbe_P2(FSCLIPmethod):
     '''
@@ -102,67 +128,129 @@ class LinearProbe_P2(FSCLIPmethod):
         lr_temp = calculate_lr_w(features)
 
         # init_alpha
-        final_init_alpha_mean= calculate_init_alpha(features, labels, self.shot, text_weights)
+        if len(text_weights.shape)==3:
+            alpha_vec = []
+            self.lr_alpha = []
+            for i in range(len(text_weights)):
+                final_init_alpha_mean = calculate_init_alpha(features, labels, self.shot, text_weights[i])
+                alpha_vec.append(Variable(
+                    final_init_alpha_mean * torch.ones(1, int(features.shape[0] / self.shot)).to(model.dtype).cuda(),
+                    requires_grad=True))
 
-        alpha_vec = Variable(final_init_alpha_mean * torch.ones(1, int(features.shape[0]/self.shot)).to(model.dtype).cuda(), requires_grad=True)
+                # lr_alpha
+                self.lr_alpha.append(calculate_lr_alpha(features, text_weights[i]))
+        else:
+            final_init_alpha_mean= calculate_init_alpha(features, labels, self.shot, text_weights)
 
-        # lr_alpha
-        self.lr_alpha = calculate_lr_alpha(features, text_weights)
+            alpha_vec = Variable(final_init_alpha_mean * torch.ones(1, int(features.shape[0]/self.shot)).to(model.dtype).cuda(), requires_grad=True)
 
-        print('final_init_alpha_mean: {}'.format(final_init_alpha_mean))
-
-        print('Calculated lr_temp, lr_alpha:'.format(lr_temp, self.lr_alpha))
+            # lr_alpha
+            self.lr_alpha = calculate_lr_alpha(features, text_weights)
 
         optimizer = torch.optim.SGD(classifier.parameters(), lr_temp, momentum=0.9)
  
  
         # Train
         print('\nStart Training procedure!')
-        
-        best_acc, best_epoch = 0.0, 0
-        for epoch in range(self.epoch):
-            
-            # print('Running model for epoch: {}'.format(epoch))
-            classifier.train()
-            vision_logits = classifier(features)
-            text_logits = features @ text_weights
-            logits = vision_logits + torch.ones(features.shape[0],1).to(model.dtype).cuda() @ alpha_vec * text_logits
-            loss = F.cross_entropy(logits, labels)
-            acc = np.mean(logits.argmax(dim=1).cpu().numpy() ==  labels.cpu().numpy()) * 100.0
-    
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
 
-            # # update for alpha
-            if (epoch + 1) % 10 == 0:
-                alpha_vec.data -= self.lr_alpha * alpha_vec.grad.data
+        if len(text_weights.shape)==3:
+            model_state, optimizer_state = copy_model_and_optimizer(model, optimizer)
+            best_acc, best_epoch = 0.0, 0
+            for epoch in range(self.epoch//2):
+                alltheweights = []
+                for i in range(len(text_weights)):
+                    if epoch == 0:
+                        load_model_and_optimizer(model, optimizer, model_state, optimizer_state)
+                    else:
+                        model.load_state_dict(avg_state_dict, strict=False)
+                    # print('Running model for epoch: {}'.format(epoch))
+                    for k in range(2):
+                        classifier.train()
+                        vision_logits = classifier(features)
+                        text_logits = features @ text_weights[i]
+                        logits = vision_logits + torch.ones(features.shape[0], 1).to(
+                            model.dtype).cuda() @ alpha_vec[i] * text_logits
+                        loss = F.cross_entropy(logits, labels)
+                        acc = np.mean(logits.argmax(dim=1).cpu().numpy() == labels.cpu().numpy()) * 100.0
 
-            classifier.eval()
-            vision_logits_val = classifier(val_features)
-            text_logits_val = val_features.detach() @ text_weights
-            logits_val = vision_logits_val + torch.ones(val_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_val
-            acc_val = np.mean(logits_val.argmax(dim=1).cpu().numpy() ==  val_labels.cpu().numpy()) * 100.0
-            # print('The accuracy for val data is ',acc_val)
-        
-            if acc_val >= best_acc:
-                best_acc = acc_val
-                best_epoch = epoch
-                vision_logits_test = classifier(test_features)
-                text_logits_test = test_features.detach() @ text_weights
-                logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_test
-                acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() ==  test_labels.cpu().numpy()) * 100.0
-                # print('The accuracy for test data is ',acc_test)
-                # torch.save(classifier, self.output_dir + "/best_lp_model_" + str(self.shot) + "shots.pt")
-                
-                # Evaluation 
-        
-        # classifier = torch.load(self.output_dir + "/best_lp_model_" + str(self.shot) + "shots.pt")        
-        # vision_logits_test = classifier(test_features)
-        # text_logits_test = test_features.detach() @ text_weights
-        # logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_test
-        # acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() ==  test_labels.cpu().numpy()) * 100.0
-        # print('The accuracy for test data is ',acc_test)
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+
+                        # # update for alpha
+                        if (epoch + 1) % 10 == 0:
+                            alpha_vec[i].data -= self.lr_alpha[i] * alpha_vec[i].grad.data
+
+                        classifier.eval()
+                        vision_logits_val = classifier(val_features)
+                        text_logits_val = val_features.detach() @ text_weights[i]
+                        logits_val = vision_logits_val + torch.ones(val_features.shape[0], 1).to(
+                            model.dtype).cuda() @ alpha_vec[i] * text_logits_val
+                        acc_val = np.mean(logits_val.argmax(dim=1).cpu().numpy() == val_labels.cpu().numpy()) * 100.0
+                        # print('The accuracy for val data is ',acc_val)
+
+                        if acc_val >= best_acc:
+                            best_acc = acc_val
+                            best_epoch = epoch
+                            vision_logits_test = classifier(test_features)
+                            text_logits_test = test_features.detach() @ text_weights[i]
+                            logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(
+                                model.dtype).cuda() @ alpha_vec[i] * text_logits_test
+                            acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() == test_labels.cpu().numpy()) * 100.0
+                    weights = {}
+                    for name, module in model.named_modules():
+                        if isinstance(module, nn.LayerNorm):
+                            for nparam, p in module.named_parameters():
+                                if nparam in ['weight', 'bias']:
+                                    weights[f"{name}.{nparam}"] = deepcopy(p)
+                    alltheweights.append(weights)
+                avg_state_dict = weight_average(alltheweights)
+                model.load_state_dict(avg_state_dict, strict=False)
+        else:
+            best_acc, best_epoch = 0.0, 0
+            for epoch in range(self.epoch):
+
+                # print('Running model for epoch: {}'.format(epoch))
+                classifier.train()
+                vision_logits = classifier(features)
+                text_logits = features @ text_weights
+                logits = vision_logits + torch.ones(features.shape[0],1).to(model.dtype).cuda() @ alpha_vec * text_logits
+                loss = F.cross_entropy(logits, labels)
+                acc = np.mean(logits.argmax(dim=1).cpu().numpy() ==  labels.cpu().numpy()) * 100.0
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                # # update for alpha
+                if (epoch + 1) % 10 == 0:
+                    alpha_vec.data -= self.lr_alpha * alpha_vec.grad.data
+
+                classifier.eval()
+                vision_logits_val = classifier(val_features)
+                text_logits_val = val_features.detach() @ text_weights
+                logits_val = vision_logits_val + torch.ones(val_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_val
+                acc_val = np.mean(logits_val.argmax(dim=1).cpu().numpy() ==  val_labels.cpu().numpy()) * 100.0
+                # print('The accuracy for val data is ',acc_val)
+
+                if acc_val >= best_acc:
+                    best_acc = acc_val
+                    best_epoch = epoch
+                    vision_logits_test = classifier(test_features)
+                    text_logits_test = test_features.detach() @ text_weights
+                    logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_test
+                    acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() ==  test_labels.cpu().numpy()) * 100.0
+                    # print('The accuracy for test data is ',acc_test)
+                    # torch.save(classifier, self.output_dir + "/best_lp_model_" + str(self.shot) + "shots.pt")
+
+                    # Evaluation
+
+            # classifier = torch.load(self.output_dir + "/best_lp_model_" + str(self.shot) + "shots.pt")
+            # vision_logits_test = classifier(test_features)
+            # text_logits_test = test_features.detach() @ text_weights
+            # logits_test = vision_logits_test + torch.ones(test_features.shape[0], 1).to(model.dtype).cuda() @ alpha_vec * text_logits_test
+            # acc_test = np.mean(logits_test.argmax(dim=1).cpu().numpy() ==  test_labels.cpu().numpy()) * 100.0
+            # print('The accuracy for test data is ',acc_test)
                 
         return loss.item(), acc_test
 
